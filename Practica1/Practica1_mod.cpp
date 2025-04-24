@@ -3,7 +3,7 @@
 #include <vector>
 #include <tuple>
 #include <limits>
-#include "mpi.h"
+#include <mpi.h>
 #include "omp.h"
 using namespace std;
 
