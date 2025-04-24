@@ -5,7 +5,7 @@
 /* Check COPYING.txt for copyright license                                   */
 /*****************************************************************************/
 
-#include "vec3.h"
+#include "Vec3.h"
 
 class Ray {
 public:

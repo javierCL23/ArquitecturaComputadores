@@ -12,7 +12,7 @@
 //==================================================================================================
 
 #include "Vec3.h"
-#include "ray.h"
+#include "Ray.h"
 #include "random.h"
 
 #include <curand_kernel.h>

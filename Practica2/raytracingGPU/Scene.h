@@ -1,7 +1,7 @@
 #pragma once
 
 #include <vector>
-
+#include <cfloat>
 #include <curand_kernel.h>
 
 #include "Vec3.h"

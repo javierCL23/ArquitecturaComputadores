@@ -2,7 +2,7 @@
 
 #include <curand_kernel.h>
 
-#include "ray.h"
+#include "Ray.h"
 #include "CollisionData.h"
 
 class Material  {

@@ -46,7 +46,8 @@ void writeBMP(const char* filename, unsigned char* data, int w, int h) {
 
 
 	FILE* f;
-	fopen_s(&f, filename, "wb");
+	f = fopen(filename, "wb");
+	
 	if (!f) {
 		printf("No se ha podido crear el archivo.\n");
 		exit(-3);

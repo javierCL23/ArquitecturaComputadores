@@ -2,9 +2,9 @@
 
 #include <curand_kernel.h>
 
-#include "vec3.h"
+#include "Vec3.h"
 
-float random();
+float MyRandom();
 Vec3 randomNormalSphere();
 Vec3 randomNormalDisk();
 

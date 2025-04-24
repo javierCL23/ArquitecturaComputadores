@@ -35,23 +35,23 @@ Scene randomScene() {
 
 	for (int a = -11; a < 11; a++) {
 		for (int b = -11; b < 11; b++) {
-			float choose_mat = random();
-			Vec3 center(a + 0.9f * random(), 0.2f, b + 0.9f * random());
+			float choose_mat = MyRandom();
+			Vec3 center(a + 0.9f * MyRandom(), 0.2f, b + 0.9f * MyRandom());
 			if ((center - Vec3(4.0f, 0.2f, 0.0f)).length() > 0.9f) {
 				if (choose_mat < 0.8f) {  // diffuse
 					list.add(new Object(
 						new Sphere(center, 0.2f),
-						new Diffuse(Vec3(random() * random(),
-							random() * random(),
-							random() * random()))
+						new Diffuse(Vec3(MyRandom() * MyRandom(),
+							MyRandom() * MyRandom(),
+							MyRandom() * MyRandom()))
 					));
 				} else if (choose_mat < 0.95f) { // metallic
 					list.add(new Object(
 						new Sphere(center, 0.2f),
-						new Metallic(Vec3(0.5f * (1.0f + random()),
-							0.5f * (1.0f + random()),
-							0.5f * (1.0f + random())),
-							0.5f * random())
+						new Metallic(Vec3(0.5f * (1.0f + MyRandom()),
+							0.5f * (1.0f + MyRandom()),
+							0.5f * (1.0f + MyRandom())),
+							0.5f * MyRandom())
 					));
 				} else {  // crystalline
 					list.add(new Object(
@@ -95,8 +95,8 @@ void rayTracingCPU(Vec3* img, int w, int h, int ns = 10) {
 		for (int i = 0; i < w; i++) {
 			Vec3 col(0.0f, 0.0f, 0.0f);
 			for (int s = 0; s < ns; s++) {
-				float u = float(i + random()) / float(w);
-				float v = float(j + random()) / float(h);
+				float u = float(i + MyRandom()) / float(w);
+				float v = float(j + MyRandom()) / float(h);
 				Ray r = cam.get_ray(u, v);
 				col += world.getSceneColor(r);
 			}

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "vec3.h"
+#include "Vec3.h"
 
 void writeBMP(const char* filename, unsigned char* data, int w, int h);
 
