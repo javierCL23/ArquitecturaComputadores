@@ -1,0 +1,25 @@
+
+Aparte de la versión en maestro-esclavo se puede programar una versión en anillo que distribuye la carga mejor entre los nodos
+
+
+				Mensajes por nodo
+Maestro-Esclavo:		1send/1recv | N send N recv
+Anillo:				2Send, 2Recv
+
+
+
+
+
+Otra forma es usando MPI_REDUCE y MPI_ALLREDUCE
+
+hayTrabajo = 0
+if (condiciones de parada)...
+	hayTrabajo++
+
+MPI_ALLREDUCE (si la suma de todos los hayTrabajo, se termina o no)
+
+Si la suma de todos es mayor que 0, no termina
+
+Por lo general, la comprobación común de todos puede ser hecha cada k iteraciones para evitar hacer envíos cada iteración. Pero esto depende de la implementación y decisión de cada uno.
+
+
