@@ -5,107 +5,53 @@
 #include <limits>
 #include <chrono>  //Para cronometrar cuánto tarda el algoritmo
 #include <fstream> //Para guardar los tiempos
+#include <algorithm> //Para función find de arrayIndex
 #include <mpi.h>
 #include "omp.h"
 
 using namespace std;
-
-// Estructuras para manejo de datos
-class arrayIndex
-{
-private:
-    int n;
-    vector<int> values;
-    int lastValueNotEmpty; // Maximo en el que se debe de buscar indices
-    int firstValueEmpty;   // Primer valor por el que se tiene que buscar huecos. Solo se actualiza
-
-public:    
-    arrayIndex(vector<int> datosIniciales, int elementos) : lastValueNotEmpty(datosIniciales.size() - 1), firstValueEmpty(datosIniciales.size()), values(elementos, -1), n(datosIniciales.size()){
-        for (int i = 0; i < datosIniciales.size(); i++){
-            values[i] = datosIniciales[i];
+class arrayIndex {
+    private:
+        std::vector<int> values;
+    
+    public:
+        arrayIndex(const std::vector<int>& datosIniciales)
+            : values(datosIniciales) {}
+    
+        int getN() const {
+            return values.size();
         }
-    }
-    int getN() const{
-        return n;
-    }
-    const vector<int>& getValues() const{ //Devuelve una referencia no modificable
-        return values;
-    }
-    vector<int>& getValuesRef(){ //Devuelve una versión modificable
-        return values;
-    }
-    void removeValue(int value){
-        for (int i = 0; i <= lastValueNotEmpty; i++){
-            if (values[i] == value){
-                values[i] = -1;
-                n--;
-                if (i < firstValueEmpty){
-                    firstValueEmpty = i;
-                }
+    
+        const std::vector<int>& getValues() const {
+            return values;
+        }
+    
+        std::vector<int>& getValuesRef() {
+            return values;
+        }
+    
+        void removeValue(int value) {
+            auto it = std::find(values.begin(), values.end(), value);
+            if (it != values.end()) {
+                values.erase(it);
             }
         }
-    }
-    void addValue(int value){
-        bool seguir = true;
-        int i = firstValueEmpty;
-
-        while (seguir){
-            if (values[i] == -1){
-                seguir = false;
-                values[i] = value;
-                if (i > lastValueNotEmpty){
-                    lastValueNotEmpty = i;
-                }
-                firstValueEmpty = i + 1; // Como minimo ahora va a estar desde el que se ha anadido en adelante
-            }
-            i++;
-            if (i >= values.size()){
-                fprintf(stderr, "ERROR trying to addValue in arrayIndex\n");
-                exit(EXIT_FAILURE);
+    
+        void addValue(int value) {
+            values.push_back(value);
+        }
+    
+        void addVector(const std::vector<int>& nuevosPuntos) {
+            values.insert(values.end(), nuevosPuntos.begin(), nuevosPuntos.end());
+        }
+    
+        void removeVector(const std::vector<int>& viejosPuntos) {
+            for (int value : viejosPuntos) {
+                removeValue(value);
             }
         }
-        n++;
-    }
-
-    void addVector(vector<int> nuevosPuntos){
-        int n = nuevosPuntos.size();
-        for (int i = 0; i < n; i++){
-            addValue(nuevosPuntos[i]);
-        }
-    }
-
-    void removeVector(vector<int> viejosPuntos){
-        int n = viejosPuntos.size();
-        for (int i = 0; i < n; i++){
-            removeValue(viejosPuntos[i]);
-        }
-    }
-
-    vector<int> getNonZeroValues(){
-        vector<int> retorno(n);
-        int i=0;
-        int puestos=0;
-        while (puestos<n){
-            if (values[i] != -1){
-                retorno[puestos] = values[i];
-                puestos++;
-            }
-            i++;
-        }
-        return retorno;
-    }
-
-    void printValues(){ // Funcion de debuggeo
-        printf("LastValueNotEmpty: %d\nFirstValueEmpty: %d\n", lastValueNotEmpty, firstValueEmpty);
-        printf("n:%d\n",n);
-        printf("[");
-        for (int i = 0; i < values.size(); i++){
-            printf(" %d ", values[i]);
-        }
-        printf("]\n");
-    }
-};
-
+    };
+    
 class matriz
 {
 private:
@@ -410,62 +356,65 @@ void reCalcCentroidPosition(
     }
 }
 
-
 float calcDistanceToCentroid(const float* dato, const float* centroid, int dims){
-    float suma = 0;
-    int nt;
-#pragma omp parallel
-    {
-        int tid;
-        nt = omp_get_num_threads();
-        tid = omp_get_thread_num();
-        float sumaInterna = 0;
-        for (int i = tid; i < dims; i += nt){
-            sumaInterna += (centroid[i] - dato[i]) * (centroid[i] - dato[i]); // ||c - x||²
-        }
-#pragma omp critical
-        suma += sumaInterna;
+    float suma = 0.0f;
+    for (int i = 0; i < dims; i++){
+        float diff = centroid[i] - dato[i];
+        suma += diff * diff;
     }
     return suma;
 }
 
 int getClosestCentroid(const float* dato, const matriz& centroids){
-    float minDist = numeric_limits<float>::infinity();
+    float minDist = std::numeric_limits<float>::infinity();
     int centroideMin = 0;
     int dims = centroids.getCols();
     int nCentroids = centroids.getRows();
-    for (int j = 0; j < nCentroids; j++){ // Calculo de la distancia a cada centroide
-        const float *actualCentroid = centroids.getData().data() + (j * dims);
-        float dist = calcDistanceToCentroid(dato, actualCentroid, dims);
-        if (dist < minDist){
-            minDist = dist;
-            centroideMin = j;
+
+//#pragma omp parallel
+ //   {
+        float localMinDist = std::numeric_limits<float>::infinity();
+        int localCentroide = 0;
+
+//#pragma omp for nowait
+        for (int j = 0; j < nCentroids; j++){
+            const float *actualCentroid = centroids.getData().data() + (j * dims);
+            float dist = calcDistanceToCentroid(dato, actualCentroid, dims);
+            if (dist < localMinDist){
+                localMinDist = dist;
+                localCentroide = j;
+            }
         }
-    }
-    // printf("Dato: [%f,%f] -> %d\n", dato[0],dato[1],centroideMin);
+
+//#pragma omp critical
+        {
+            if (localMinDist < minDist){
+                minDist = localMinDist;
+                centroideMin = localCentroide;
+            }
+        }
+//    }
     return centroideMin;
 }
-
 vector<tuple<int, int>> newPointsAssignation(
     const matriz& data,
     const arrayIndex& indices,
     const matriz& centroids
 ){
-    vector<tuple<int, int>> newPointsAssignation(indices.getN());
+    const vector<int>& idxs = indices.getValues();
+    int n = indices.getN();
     int dims = data.getCols();
-    int i = 0;
-    int addedPoints = 0;
-    int indiceActual;
-    while (addedPoints < indices.getN()){
-        indiceActual = indices.getValues()[i];
-        if (indiceActual != -1){
-            const float *dato = data.getData().data() + (indiceActual * dims); // Puntero al elemento (indiceActual,0) de la matriz de datos;
-            newPointsAssignation[addedPoints] = make_tuple(indiceActual, getClosestCentroid(dato, centroids));
-            addedPoints += 1;
-        }
-        i++;
+
+    vector<tuple<int, int>> result(n);
+
+#pragma omp parallel for
+    for (int i = 0; i < n; i++){
+        int index = idxs[i];
+        const float *dato = data.getData().data() + (index * dims);
+        int closest = getClosestCentroid(dato, centroids);
+        result[i] = make_tuple(index, closest);
     }
-    return newPointsAssignation;
+    return result;
 }
 
 void exchange_indices(int rank, int size, const vector<vector<int>> &indices_to_send, vector<int> &indices_to_recv){ 
@@ -602,7 +551,7 @@ int main(int argc, char **argv)
         datos = matriz(argv[1]);
         dims[0] = datos.getRows();
         dims[1] = datos.getCols();
-        datos.printData();
+        //datos.printData();
     }
 
     MPI_Bcast(&dims, 2, MPI_INT, 0, MPI_COMM_WORLD);
@@ -620,7 +569,7 @@ int main(int argc, char **argv)
     vector<int> datosSalientes = {};
     int nViejos = 0;
 
-    arrayIndex indexCluster({}, dims[0]);
+    arrayIndex indexCluster({});
 
     matriz centroideLocal(1, dims[1]);
     matriz centroideSum(1, dims[1]);
@@ -636,12 +585,12 @@ int main(int argc, char **argv)
         if (pid==0){
             printf("-------------------------------------------------------------------------\n");
         }
+
         MPI_Allgather(centroideLocal.getData().data(), dims[1], MPI_FLOAT,
                     globalCentroides.getData().data(), dims[1], MPI_FLOAT, MPI_COMM_WORLD);
-     
         
         if (pid ==0) globalCentroides.printData();
-        
+ 
         vector<tuple<int, int>> nuevasAsignaciones = newPointsAssignation(datos, indexCluster, globalCentroides);
         vector<int> oldPoints;
         vector<vector<int>> pointsForINode(np);
@@ -654,7 +603,7 @@ int main(int argc, char **argv)
                 pointsForINode[nuevaAsignacion].push_back(index);
             }
         }
-        
+
         //printCambios(nuevasAsignaciones,pid);
 
         // printForINode(pointsForINode);
@@ -672,7 +621,7 @@ int main(int argc, char **argv)
             indexCluster.addVector(newPoints);
             indexCluster.removeVector(oldPoints);
             //Los nuevos valores son los del indexCluster (todos)
-            newPoints = indexCluster.getNonZeroValues();
+            newPoints = indexCluster.getValues();
             reCalcCentroidPosition(datos,centroideLocal,centroideSum,0,newPoints,{});
         }
         else{ //Caso base: calcula la media de los nuevos puntos, y modifica la anterior.
@@ -680,7 +629,7 @@ int main(int argc, char **argv)
             indexCluster.addVector(newPoints);
             indexCluster.removeVector(oldPoints);
         }
-    
+
         // seguir = stopCalculation(0.05, nViejos, indexCluster.getN(), pid, np);      //Version maestro-esclavo
         seguir = stopCalculation2(0.05,nViejos,indexCluster.getN(),pid, np);      //Version Reduce
         iter += 1;
@@ -692,7 +641,7 @@ int main(int argc, char **argv)
         globalCentroides.printData();
     }
     MPI_Barrier(MPI_COMM_WORLD);
-    printVector(indexCluster.getNonZeroValues(),pid);
+    printVector(indexCluster.getValues(),pid);
     MPI_Barrier(MPI_COMM_WORLD);
     if (pid == 0){
         auto t1 = std::chrono::high_resolution_clock::now();
