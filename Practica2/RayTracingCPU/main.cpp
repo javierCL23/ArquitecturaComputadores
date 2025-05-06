@@ -258,8 +258,8 @@ void rayTracingCPU(
 
 int main() {
 	srand(time(0));
-    int w = 600;
-	int h = 600;
+    int w = 3840;
+	int h = 2160;
 	int ns = 50;
     const int patches_x = 1;
     const int patches_y = 1;

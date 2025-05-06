@@ -9,3 +9,6 @@ nvcc -o raytracing_executable \
      random.cu \
      raytracing.cu \
      utils.cu
+echo Compilado
+
+./raytracing_executable

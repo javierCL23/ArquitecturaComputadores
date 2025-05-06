@@ -13,7 +13,7 @@ program="$1"
 input="$2"
 
 # Compilar con OpenMP y MPI (usando flags definidos arriba)
-$CXX $CXXFLAGS "$program.cpp" -o "$program" -fopenmp
+$CXX $CXXFLAGS "$program.cpp" -o "$program" -fopenmp -O2
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Fallo en la compilación"

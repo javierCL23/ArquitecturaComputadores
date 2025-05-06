@@ -110,8 +110,8 @@ void rayTracingCPU(Vec3* img, int w, int h, int ns = 10) {
 }
 
 int main() {
-	int w = 512;// 1200;
-	int h = 256;// 800;
+	int w = 600;
+	int h = 600;
 	int ns = 10;
 	clock_t start, stop;
 	double timer_seconds;
@@ -164,6 +164,6 @@ int main() {
 	free(data);
 	cudaDeviceReset();
 
-	getchar();
+//	getchar();
 	return (0);
 }

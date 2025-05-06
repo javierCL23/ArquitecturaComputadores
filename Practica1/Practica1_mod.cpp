@@ -3,8 +3,11 @@
 #include <vector>
 #include <tuple>
 #include <limits>
+#include <chrono>  //Para cronometrar cuánto tarda el algoritmo
+#include <fstream> //Para guardar los tiempos
 #include <mpi.h>
 #include "omp.h"
+
 using namespace std;
 
 // Estructuras para manejo de datos
@@ -22,7 +25,7 @@ public:
             values[i] = datosIniciales[i];
         }
     }
-    int getN(){
+    int getN() const{
         return n;
     }
     const vector<int>& getValues() const{ //Devuelve una referencia no modificable
@@ -118,30 +121,43 @@ public:
             fprintf(stderr, "ERROR: Couldn't open the file\n");
             exit(EXIT_FAILURE);
         }
-        fread(&nRows, sizeof(int), 1, readFile);
-        fread(&nCols, sizeof(int), 1, readFile);
-    
-        if (nRows <= 0 || nCols <= 0){
-            fprintf(stderr, "ERROR: can't use those dimensions for your data\n");
+        if (fread(&nRows, sizeof(int), 1, readFile) != 1) {
+            fprintf(stderr, "ERROR: Failed to read number of rows\n");
             exit(EXIT_FAILURE);
         }
-        data = vector<float>(nRows*nCols);
-        fread(data.data(), sizeof(float), nRows * nCols, readFile);
-        fclose(readFile);
+        
+        if (fread(&nCols, sizeof(int), 1, readFile) != 1) {
+            fprintf(stderr, "ERROR: Failed to read number of columns\n");
+            exit(EXIT_FAILURE);
+        }
+        
+        data = vector<float>(nRows * nCols);
+        if (fread(data.data(), sizeof(float), nRows * nCols, readFile) != size_t(nRows * nCols)) {
+            fprintf(stderr, "ERROR: Failed to read matrix data\n");
+            exit(EXIT_FAILURE);
+        }        fclose(readFile);
     }
-    float &operator()(int row, int col){
+    // Para lectura en objetos const
+    float operator()(int row, int col) const {
+        return data[row * nCols + col];
+    }
+
+    // Para escritura en objetos no const
+    float& operator()(int row, int col) {
         return data[row * nCols + col];
     }
 
     int getRows() const { return nRows; }
     int getCols() const { return nCols; }
 
-    vector<float> getData() const{ //Devuelve los datos, pero no modificables
+    const vector<float>& getData() const {
         return data;
     }
-    vector<float>& getDataRef() { //Devuelve los datos, pero modificables
+    
+    vector<float>& getData() {
         return data;
     }
+    
     void printData(){
         cout << endl
              << "Data:" << endl;
@@ -162,7 +178,7 @@ public:
 
 
 // Funciones OMP (granularidad fina --> Cálculo de estadísticos de toda la matriz de datos)
-float meanCalcRow(matriz data, int col){
+float meanCalcRow(const matriz& data, int col){
     int nt;
     float suma = 0;
 #pragma omp parallel
@@ -182,7 +198,7 @@ float meanCalcRow(matriz data, int col){
     return suma / data.getRows();
 }
 
-float minCalcRow(matriz data, int col){
+float minCalcRow(const matriz& data, int col){
     int nt;
     float min = numeric_limits<float>::infinity();
 #pragma omp parallel
@@ -208,7 +224,7 @@ float minCalcRow(matriz data, int col){
     return min;
 }
 
-float maxCalcRow(matriz data, int col){
+float maxCalcRow(const matriz& data, int col){
     int nt;
     float max = -numeric_limits<float>::infinity();
 #pragma omp parallel
@@ -234,8 +250,7 @@ float maxCalcRow(matriz data, int col){
     return max;
 }
 
-float varCalcRow(matriz data, int col)
-{
+float varCalcRow(const matriz& data, int col){
     int nt;
     float media = meanCalcRow(data, col);
     float suma = 0;
@@ -257,8 +272,7 @@ float varCalcRow(matriz data, int col)
     return suma / (data.getRows() - 1); // Cuasi-Varianza porque es insesgado
 }
 
-vector<float> statisticCalc(matriz data, string option)
-{
+vector<float> statisticCalc(const matriz& data, const string& option){
     /*Para aprovechar codigo y no tener multiples
     funciones innecesariamente, mientras que se desicciona
     el codigo un poco en varias funciones (funciones que
@@ -287,7 +301,7 @@ vector<float> statisticCalc(matriz data, string option)
 }
 
 // Visualizacion de las estadisticas
-void printStatistic(vector<float> stats, string stat, int n){
+void printStatistic(const vector<float>& stats, const string& stat, int n){
     std::cout << stat << ": [";
     for (int i = 0; i < n; i++){
         printf("%f", stats[i]);
@@ -299,7 +313,7 @@ void printStatistic(vector<float> stats, string stat, int n){
     printf("]\n");
 }
 
-void printAllStatistics(matriz data){
+void printAllStatistics(const matriz& data){
     vector<float> medias = statisticCalc(data, "mean");
     vector<float> mins = statisticCalc(data, "min");
     vector<float> maxs = statisticCalc(data, "max");
@@ -350,7 +364,7 @@ vector<int> partirDatos(int nodo, int n, int nNodos){
     return vectorRetorno;
 }
 
-float sumCalRowMPI(matriz data, vector<int> indices, int col){
+float sumCalRowMPI(const matriz& data, const vector<int>& indices, int col){
     float suma = 0;
     int nt;
 #pragma omp parallel
@@ -370,7 +384,14 @@ float sumCalRowMPI(matriz data, vector<int> indices, int col){
     return suma;
 }
 
-void reCalcCentroidPosition(const matriz & data, matriz &centroidPosition, matriz &centroidPositionSum, int nActual, const vector<int> &  newPoints, const vector<int> &  oldPoints){
+void reCalcCentroidPosition(
+    const matriz& data,
+    matriz& centroidPosition,
+    matriz& centroidPositionSum,
+    int nActual,
+    const vector<int>& newPoints,
+    const vector<int>& oldPoints
+){
     int nNews = newPoints.size();
     int nOlds = oldPoints.size();
     float sumado;
@@ -390,7 +411,7 @@ void reCalcCentroidPosition(const matriz & data, matriz &centroidPosition, matri
 }
 
 
-float calcDistanceToCentroid(float *dato, float *centroid, int dims){
+float calcDistanceToCentroid(const float* dato, const float* centroid, int dims){
     float suma = 0;
     int nt;
 #pragma omp parallel
@@ -408,13 +429,13 @@ float calcDistanceToCentroid(float *dato, float *centroid, int dims){
     return suma;
 }
 
-int getClosestCentroid(float *dato, matriz centroids){
+int getClosestCentroid(const float* dato, const matriz& centroids){
     float minDist = numeric_limits<float>::infinity();
     int centroideMin = 0;
     int dims = centroids.getCols();
     int nCentroids = centroids.getRows();
     for (int j = 0; j < nCentroids; j++){ // Calculo de la distancia a cada centroide
-        float *actualCentroid = centroids.getDataRef().data() + (j * dims);
+        const float *actualCentroid = centroids.getData().data() + (j * dims);
         float dist = calcDistanceToCentroid(dato, actualCentroid, dims);
         if (dist < minDist){
             minDist = dist;
@@ -425,7 +446,11 @@ int getClosestCentroid(float *dato, matriz centroids){
     return centroideMin;
 }
 
-vector<tuple<int, int>> newPointsAssignation(matriz data, arrayIndex indices, matriz centroids){
+vector<tuple<int, int>> newPointsAssignation(
+    const matriz& data,
+    const arrayIndex& indices,
+    const matriz& centroids
+){
     vector<tuple<int, int>> newPointsAssignation(indices.getN());
     int dims = data.getCols();
     int i = 0;
@@ -434,7 +459,7 @@ vector<tuple<int, int>> newPointsAssignation(matriz data, arrayIndex indices, ma
     while (addedPoints < indices.getN()){
         indiceActual = indices.getValues()[i];
         if (indiceActual != -1){
-            float *dato = data.getDataRef().data() + (indiceActual * dims); // Puntero al elemento (indiceActual,0) de la matriz de datos;
+            const float *dato = data.getData().data() + (indiceActual * dims); // Puntero al elemento (indiceActual,0) de la matriz de datos;
             newPointsAssignation[addedPoints] = make_tuple(indiceActual, getClosestCentroid(dato, centroids));
             addedPoints += 1;
         }
@@ -527,7 +552,7 @@ bool stopCalculation2(float umbral, int nOldPoints, int n, int pid, int np){
     return (hayTrabajo >= 1);
 }
 
-void printVector(vector<int> vector,int pid){
+void printVector(const vector<int> &vector, int pid){
     printf("Nodo%d: [",pid);
     for (int i=0;i<vector.size();i++){
         printf(" %d ",vector[i]);
@@ -535,7 +560,7 @@ void printVector(vector<int> vector,int pid){
     printf("]\n");
 }
 
-void printCambios(vector<tuple<int,int>> nuevasAsignaciones,int pid){
+void printCambios(const vector<tuple<int, int>> &nuevasAsignaciones, int pid){
     printf("Nodo%d;\n",pid);
     for (int i=0;i<nuevasAsignaciones.size();i++){
         int index = get<0>(nuevasAsignaciones[i]);
@@ -545,7 +570,7 @@ void printCambios(vector<tuple<int,int>> nuevasAsignaciones,int pid){
     }
 }
 
-void printForINode(vector<vector<int>> pointsForINode){
+void printForINode(const vector<vector<int>> &pointsForINode){
     for (int i = 0; i < pointsForINode.size();i++){
         vector <int> vec = pointsForINode[i];
         printf("For Node%d [",i);
@@ -585,8 +610,9 @@ int main(int argc, char **argv)
     if (pid != 0){
         datos = matriz(dims[0], dims[1]);
     }
-    MPI_Bcast(datos.getDataRef().data(), dims[0] * dims[1], MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(datos.getData().data(), dims[0] * dims[1], MPI_FLOAT, 0, MPI_COMM_WORLD);
 
+    auto t0 = std::chrono::high_resolution_clock::now();
 
     //--------------------------------------ASIGNACION DE LOS CLUSTERS INICIALES--------------------------------------
     vector<int> datosEntrantes = partirDatos(pid, dims[0], np);
@@ -606,12 +632,12 @@ int main(int argc, char **argv)
     
     bool seguir = true;
     int iter = 1;
-    while (seguir && iter <= 10){
+    while (seguir && iter <= 2000){
         if (pid==0){
             printf("-------------------------------------------------------------------------\n");
         }
         MPI_Allgather(centroideLocal.getData().data(), dims[1], MPI_FLOAT,
-                    globalCentroides.getDataRef().data(), dims[1], MPI_FLOAT, MPI_COMM_WORLD);
+                    globalCentroides.getData().data(), dims[1], MPI_FLOAT, MPI_COMM_WORLD);
      
         
         if (pid ==0) globalCentroides.printData();
@@ -629,13 +655,13 @@ int main(int argc, char **argv)
             }
         }
         
-        printCambios(nuevasAsignaciones,pid);
+        //printCambios(nuevasAsignaciones,pid);
 
         // printForINode(pointsForINode);
         vector<int> newPoints = {};
         exchange_indices(pid, np, pointsForINode, newPoints);
 
-        printVector(newPoints,pid);
+        //printVector(newPoints,pid);
         int nActual = indexCluster.getN();
         nViejos = oldPoints.size();
         nNuevos = newPoints.size();
@@ -659,12 +685,25 @@ int main(int argc, char **argv)
         seguir = stopCalculation2(0.05,nViejos,indexCluster.getN(),pid, np);      //Version Reduce
         iter += 1;
     }
-
+    //--------------------------------------    RESULTADOS     --------------------------------------
     if (pid == 0){
+        printf("-------------------------------RESULTADOS-------------------------------\n");
+        if (seguir) printf("Resultados no convergieron\n");
         globalCentroides.printData();
     }
+    MPI_Barrier(MPI_COMM_WORLD);
     printVector(indexCluster.getNonZeroValues(),pid);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (pid == 0){
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::cout << "Tiempo total de ejecución: " << float(ms)/1000 << " s\n";
+        std::ofstream tiempos("tiempos.txt", std::ios::app);
+        if (tiempos.is_open()) {
+            tiempos << float(ms)/1000 << endl;
+            tiempos.close();
+        }
+    }
     MPI_Finalize();
-
     return 0;
 }
