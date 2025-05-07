@@ -11,6 +11,7 @@ if [ "$#" -eq 3 ]
 then
 	loops=$3
 else
+	echo gols
 	loops=5
 fi
 
@@ -22,7 +23,7 @@ do
 
 	g++ OwnPointGenerator.cpp -o OwnPointGenerator
 	./OwnPointGenerator $1 $2 Datos
-	./ejecutar.sh Practica1_mod Datos.bin
+	./ejecutar.sh Practica1Final Datos.bin
 done
 
 rm "Datos.bin" "Datos.txt"
