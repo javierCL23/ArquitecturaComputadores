@@ -1,0 +1,249 @@
+---
+title: "Memoria Práctica 1"
+author: "Javier Carreño Luque"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+# Introducción
+En esta memoria se describe el desarrollo de un programa kMeans, que implementa el algoritmo de k-medias para datos almacenados en formato binario, optimizado mediante técnicas de paralelización con MPI (a nivel de nodos) y OpenMP (a nivel de hilos).
+
+La estructura del documento sigue un enfoque modular, detallando en cada sección:
+- Las decisiones de diseño y justificación de las implementaciones.
+- Los desafíos y problemas encontrados durante el desarrollo y sus soluciones.
+- Las optimizaciones aplicadas para mejorar el rendimiento en entornos paralelos.
+
+El objetivo de la memoria es explicar el cómo y por qué de cada parte del código además de mencionar y explicar las limitaciones que tenga la aproximación sugerida.
+
+# Código
+
+## Vista general
+El algoritmo en rasgos generales lo que hace inicialmente es crear un número x de nodos. El nodo 0, que es la máquina del host donde deberían estar los datos almacenados, carga todo el dataframe y se encarga de enviar a todos los demás todos los datos. Una vez hecho esto, cada uno de los nodos determina, gracias a su PID, el rango de datos que va a manejar.
+
+Una vez se tienen los clusters montados, generan un centroide como la media de todos los datos que se les han sido asignados y empieza el algoritmo de kmedias como normalmente se haría, recalculando la asignación de los datos a diferentes clusters en función de la distancia euclídea cuadrática y con un criterio de parada que consiste en un número máximo de iteraciones o un envío de datos entre nodos menor al 5% en cada uno de ellos.
+
+Finalmente, se imprimen las posiciones de los clusters y estadísticos por columna de los datos, además de una pequeña flag avisando de si el algoritmo convergió o paró por número de iteraciones.
+
+Estos estadísticos son:
+- Mínimo
+- Máximo
+- Media
+- Varianza
+
+## Clases
+
+### ArrayIndex
+La finalidad principal de esta clase es mantener una lista con los índices de las observaciones que pertenecen a un mismo nodo. Esto se puede hacer con un vector o array simple, pero en este caso se ha intentado hacer una lista que prioriza la escritura en la lista por encima de la optimización de memoria o lecturas.
+Esto se consigue creando un vector previsivamente más grande de lo necesario que se rellena con "-1" (valor no válido como índice, lo que implica vacío) y manteniendo un par de variables que controlan el índice mínimo en el que empezar a buscar las inserciones o eliminaciones, es decir, se guarda la posición en el que se asegura que antes no hay espacios sin rellenar en el vector y la última posición en la que se sabe que hay un índice guardado, consiguiendo con estos dos valores que no se modifica en la medida de lo posible el tamaño del vector, ahorrándose además en el caso medio la necesidad de recorrer el vector entero.
+
+Internamente cuenta con métodos para añadir o eliminar índices, una función de depuración que imprime toda la información relevante de la clase...
+
+En cuanto a su inicialización, se le debe pasar un vector o array que contenga los índices iniciales con los que se va a trabajar y N que representa el tamaño de este array. 
+
+### Matriz
+Su uso no está restringido a ser la clase dedicada a mantener los datos en una estructura, si no que también es usado para guardar la información de centroides (los centroides locales que solo tienen cada componente MPI, el centroide global que lo tienen todos los componentes MPI).
+
+En cuanto a su implementación, se trata de una matriz vectorizada con un método que permite el uso de notación matricial típica en distintos lenguajes de programación
+``` C++
+float &operator()(int row, int col){
+        return data[row * nCols + col];
+    }
+```
+Las posibles opciones de inicialización de esta clase son indicando el número de filas y columnas, o usando una ruta a un fichero binario que tenga el formato de "nFilas(int), nCols(int), valores(floats)".
+
+También incluye funciones para la depuración como "printData()" o acceso a variables como "getRows()" o "getCols()" entre otras.
+
+Dado que la clase se intenta encapsular lo máximo posible, surgió un gran problema que como consecuencia alargó el proceso de depuración considerablemente al intentar hacer que el usuario no tenga acceso directo a los valores de la matriz para evitar que se modifiquen en la medida de lo posible usando pasos por referencia constante. El problema con esto fue que por alguna razón el interior del vector que devuelve la función "getData()" contiene basura por una razón que no se supo entender por lo que se decidió usar un paso por referencia no constante que arreglaba este problema aún si esto conlleva a una prácticas peores.
+
+## OpenMP
+
+En general, para todas las aplicaciones de paralelización por medio de tecnología OpenMP se usa el mismo principio de reducción:
+``` C++
+	int nt;
+	float suma = 0;
+#pragma omp parallel
+    {
+        int tid;
+        nt = omp_get_num_threads();
+        tid = omp_get_thread_num();
+	        if (tid < data.getRows()){ // En caso de que los datos tengan menos 
+								       //observaciones que hilos, no debe ejecutar.
+            float sumaInterna = data(tid, col);
+            for (int i = tid + nt; i < data.getRows(); i += nt){
+                sumaInterna += data(i, col);
+            }
+#pragma omp critical
+            suma += sumaInterna;
+        }
+    }
+```
+Para cada hilo se mantiene una suma intermedia que lleva la cuenta de los valores que ha procesado y a medida que los hilos terminan el bucle principal, suman a una variable conjunta su resultado. Normalmente se suelen hacer operaciones diferentes dentro del bucle principal en función de si se quiere hacer una media, calcular una varianza, etc. pero todos se pueden resumir de la misma manera. Mención honorífica al cálculo de mínimos y máximos que requieren del uso de valores especiales de infinitos gracias "numeric_limits\<float\>::infinity()" para comparar (fue un ligero problema a solucionar que no se tardó mucho en identificar).
+
+No se planteó la opción de aplicar OpenMP en la clase de arrayIndex para las lecturas, inserciones o eliminaciones aún si podían llegar a ser una opción muy viable para mejorar la velocidad en estos problemas por una cuestión de tiempo pero podría haber sido una buena decisión.
+
+## MPI
+Esta es posiblemente la sección que mayor cantidad de problemas a podido dar, principalmente por la implementación de la función "exchange_indices()", que acabó desarrollando DeepSeek (conversación que no se ha logrado rescatar) porque fue bastante complicado encontrar ejemplos desarrollados de la aproximación que se quería realizar además de que la documentación es bastante contraintuitiva.
+La idea de esta función es que todos los nodos intercambien información con los demás para poder redistribuir los índices de los datos que han sido reasignados a un nuevo nodo. El problema con esto es que no todos los nodos van a mandar ni la misma información a los demás, ni cada uno va a recibir una cantidad fija de datos por lo que se debe fijar antes la cantidad de datos que recibirá cada uno independientemente para luego sí, recibirla.
+1. Preparar los parámetros para MPI_Alltoallv
+ 2. Calcular send_counts y sdispls (desplazamientos en el buffer de envío)
+ 3. Crear el buffer de envío (todos los índices concatenados)
+ 4. Intercambiar el número de índices que cada proceso recibirá
+ 5. Calcular rdispls (Desplazamientos en el buffer de recepción) y el tamaño total del buffer de recepción
+ 6. Preparar el buffer de recepción
+ 7. Intercambiar los índices usando MPI_Alltoallv
+
+En esta tecnología se ha aplicado principalmente una topología P2P aunque con alguna excepción que sigue algo más parecido a maestro esclavo, como a la hora de distribuir el conjunto de datos a todos los nodos o la función "stopCalculation()" que acabó siendo sustituida por su versión "stopCalculation2()" que tiene una aproximación más All to All.
+
+## Main
+El funcionamiento conjunto de todo los descrito anteriormente se compenetra en un main que se describe a continuación:
+
+Previo a cualquier cosa se llevan a cabo un par de controles previos para ver si el formato de uso del programa es el correcto o no, dado que es necesario que se le pase como argumento la ruta al fichero binario con los datos, además de inicializar los nodos MPI.
+
+### Cargado de los datos
+Dentro del nodo 0 que es donde se sabe que están los datos, se cargan en su totalidad y se comunica a todos los demás las dimensiones de los datos para que preparen una matriz para recibir este mismo dataframe.
+
+### Asignación de clusters iniciales
+La forma en la que se asignan los datos a cada cluster inicialmente es muy simple. Simplemente se divide por n_clusters el número de filas que se tengan y en caso del último cluster, los que puedan sobrar de esta división se le son asignados con el fin de no dejar ningún dato fuera. Se decidió esta distribución porque no se considera que pueda generar un desbalance muy grande entre clusters puesto que como máximo el último cluster tendrá n_clusters - 1 datos, y dado que por lo general no se tienen muchos nodos en comparación con el número de datos, no es un problema.
+
+Tras esto se inicializan también las matrices necesarias de centroides y el arrayIndex de cada uno.
+
+### Cálculo y envío de centroides
+Esta sección es la base de todo el algoritmo. 
+Inicialmente se calculan los centroides como la media de los datos que se tienen en cada uno de los nodos y se guarda la esta información en la matriz (aún si es un vector a efectos prácticos dado que tiene dimensiones 1 x nCols) centroideLocal y centroideSum (donde no están normalizados por n) además de declarar e inicializar a todo 0's la matriz de globalCentroides.
+
+Con esto ya se puede actualizar indexCluster con los datos iniciales e iniciar el bucle del algoritmo.
+
+Se comparten la información de los centroidesLocal entre sí todos con todos para guardarlo en globalCentroides por medio de un "MPI_Allgather()" y con esto ven las nuevas asignaciones que pueden tener los nodos de su cluster. Estas asignaciones se añaden a dos grupos:
+``` C++
+vector<int> oldPoints;
+vector<vector<int>> pointsForINode(np);
+```
+Donde oldPoints son los puntos que van a dejar de estar en su cluster, y pointsForINode es lo mismo, pero además indicando a quién va cada punto. Esto se hace así para poder usar oldPoints en la actualización del arrayIndex, mientras que pointsForINode se usará para la ya mencionada "exchange_indices()".
+
+Una vez hecho esto, se intercambian los índices y se pasa a recalcular la posición del centroide, no sin antes decidir cómo hacerlo, si calculando desde 0 este centroide, o únicamente añadiendo y eliminando los puntos que se han añadido/eliminado.
+
+Finalmente se evalúa el criterio de parada viendo si la proporción de puntos que se mueven desde un nodo a otros es menor al 5% en todos los nodos.
+
+### Resultados
+Después de este proceso se imprimen los centroides resultantes de este algoritmo además de un pequeño aviso para indicar si el programa convergió a una solución o paró por exceso de iteraciones.
+
+También se imprimen los índices de los datos que acaban en cada uno de los distintos nodos y el programa finaliza.
+
+
+# Conclusiones
+
+Para analizar cómo escala el tiempo de ejecución en función de los datos que se usen se han observado dos escenarios distintos en los que se comparten dos características: el número de nodos MPI y la forma de generar los datos.
+
+## Generación de datos
+
+El programa que se ha usado para la generación de datos lo que hace es generar una serie de k puntos (que coincide con el número de nodos MPI que se han usado en las pruebas) sobre los que se generan puntos cercanos con un radio máximo. No se decide el número de puntos por centro si no que se decide de manera aleatoria y uniforme por lo que a medida que se aumenta el número de puntos se acerca un modelo en el que se decide el número de puntos por centro.
+
+## Número de nodos MPI
+Aunque más adelante hay simulaciones realizadas con un menor número de nodos MPI, no son tan exhaustivas como en este caso que se tomó como referencia 4 nodos MPI. De igual forma, todo esto se ha realizado en una sola máquina por lo que no son resultados realistas y son considerablemente peores de los que podríamos observar en un sistema distribuido real.
+
+
+## Análisis de resultados
+
+### Aumento en número de observaciones
+En este escenario se ha decidido dejar el número de variables en dos, y el número de filas desde 10 a 200 aumentando de 5 en 5 y sobre cada caso se han tomado 10 muestras. 
+
+```{r, echo=FALSE, fig.width=9, fig.height=3}
+archivos <- "tiempos.txt"
+
+datos = read.table(archivos)
+
+datos = as.data.frame(matrix(as.numeric(datos$V1),nrow = 10,byrow=F))
+nDatos = seq(from=10,to=200,by=5)
+colnames(datos) = nDatos
+Medias = colMeans(datos)
+Vars = apply(datos, 2, var)
+
+matplot(t(datos), type = "l", lty = 1, col = 1:10,  xaxt = "n",
+        xlab = "Nº de observaciones", ylab = "Tiempo (s)", main = "Ejecuciones con distinto número de datos")
+axis(1, at = 1:length(nDatos), labels = nDatos)
+
+```
+
+Cada una de las rectas que se aprecian se pueden interpretar como distintas simulaciones con distinto número de observaciones. En el eje y está representado el tiempo en segundos y en el eje x el número de observaciones consideradas en cada caso. En general se puede observar una fluctuación notoria que se debe al número de iteraciones por las que ha tenido que pasar el algoritmo hasta encontrar una solución. Dado que este proceso no conlleva mayor o menor cómputo entre iteraciones dentro de una misma ejecución, lo más sencillo para entender cómo afecta el número de observaciones al tiempo de ejecución sería observando el mínimo de cada escenario:
+
+```{r, echo=FALSE, fig.width=9, fig.height=3}
+
+minimos_por_columna <- apply(datos, 2, min)
+
+plot(y = minimos_por_columna, x = nDatos, type = "l",
+     xlab = "Nº de observaciones", ylab = "Tiempo (s)",
+     main = "Mínimo en cada cantidad de observaciones",
+     xaxt = "n")
+axis(1, at = nDatos, labels = nDatos)
+
+```
+
+Con esto se puede ver cómo la relación parece ser bastante lineal, cosa que no debería de pasar teniendo en cuenta la naturaleza explosiva de este algoritmo, pero podemos asumir que esto sucede porque puedan ser casos en los que con una iteración se haya alcanzado la solución óptima por lo que no se nota tanto la diferencia, o bien es porque no se han hecho pruebas con suficientes datos como para ser observable.
+
+### Aumento en el número de variables
+
+Para este segundo escenario, se han usado 20 datos y se han observado los tiempos para 1 a 30 variables 10 veces para cada una.
+
+
+```{r, echo=FALSE, fig.width=9, fig.height=3}
+archivos <- "tiempos2.txt"
+
+datos2 = read.table(archivos)
+
+datos2 = as.data.frame(matrix(as.numeric(datos2$V1),nrow = 10,byrow=F))
+Medias2 = colMeans(datos2)
+Vars2 = apply(datos2, 2, var)
+matplot(t(datos2), type = "l", lty = 1, col = 1:10,  xaxt = "n",
+        xlab = "Nº de variables", ylab = "Tiempo (s)", main = "Ejecuciones con distinto variables")
+axis(1, at=1:30, labels = 1:30)
+
+```
+
+En este segundo escenario vemos cómo los tiempos tienen una forma más estable. Nuevamente los tiempos tienen una tendencia positiva pero no crecen tan rápido en comparación con el escenario anterior. Esto nos indica que el algoritmo es mucho más estable cuando se aumeta la cantidad de información horizontal que vertical. En este caso tenemos un máximo de 6000 datos (20 x 30) mientras que en el escenario anterior teníamos unos máximos de 400 (200 x 2) y la diferencias en tiempo de cómputo son cláramente apreciables.
+
+### Comparación de escenarios
+
+Viendo estadísticos como la media y la varianza en cada uno de los escenarios podemos apreciar 
+
+
+```{r, echo=FALSE}
+par(mfrow = c(1, 2))  # 1 fila, 2 columnas
+
+# Graficar la comparación de medias (means1 vs means2)
+plot(Medias, type = "l", col = "blue", xlab = "Índice de columna", ylab = "Tiempo medio (s)",
+     main = "Comparación de medias", lty = 1)
+lines(Medias2, col = "red", lty = 2)  # Añadir means2 en rojo con línea discontinua
+legend("topright", legend = c("Nº de Observaciones", "Dimensionalidad"), col = c("blue", "red"), lty = c(1, 2))
+
+
+# Graficar la comparación de varianzas (vars1 vs vars2)
+plot(Vars, type = "l", col = "blue", xlab = "Índice de columna", ylab = "Varianza",
+     main = "Comparación de varianzas", lty = 1)
+lines(Vars2, col = "red", lty = 2)  # Añadir vars2 en rojo con línea discontinua
+legend("topright", legend = c("Nº de Observaciones", "Dimensionalidad"), col = c("blue", "red"), lty = c(1, 2))
+
+
+# Restaurar la configuración de gráficos por defecto
+par(mfrow = c(1, 1))  # Esto deja solo un gráfico a partir de aquí
+
+```
+
+Como se puede observar, la la principal diferencia remarcable está en la varianza. En el segundo escenario la varianza es casi constante lo que nos indica una clara estabilidad, por no hablar de que la media también tiene un crecimiento considerablemente más suave.
+
+Estas gráficas no son justas porque no se ha usado ni el mismo número de pruebas ni contienen el mismo número de datos total relacionando Filas x Columnas, pero con eso en cuenta se puede inferir que este tipo de algoritmos se benefician más de casos de alta dimensionalidad con baja interpretabilidad y pocas observaciones.
+
+
+## Comentarios extra
+
+Tras ver que los resultados no mejoraban por ningún lado y rehacer la práctica entera optimizando al máximo todo lo que se pueda dejando de lado controles menores para asegurar que no hay condiciones de carrera, la mejora en la eficiencia ha sido escandalosa llegando a ridículos insospechables como el procesamiento 
+
+
+
+
+
+
+
