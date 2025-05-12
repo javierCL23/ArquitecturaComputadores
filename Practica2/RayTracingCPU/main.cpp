@@ -9,6 +9,10 @@
 // with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //==================================================================================================
 #include "omp.h"
+#include <mpi.h>
+
+#include <vector>
+#include <cstring> // memcpy
 
 #include <float.h>
 #include <cstdio>
@@ -18,6 +22,7 @@
 #include <sstream>
 #include <fstream>
 #include <chrono>
+#include <cmath> 
 
 #include "Camera.h"
 #include "Object.h"
@@ -173,129 +178,158 @@ Scene randomScene() {
 	return list;
 }
 
-float calcDistanceToCentroid(float *dato, float *centroid, int dims){
-    float suma = 0;
-    int nt;
-#pragma omp parallel
-    {
-        int tid;
-        nt = omp_get_num_threads();
-        tid = omp_get_thread_num();
-        float sumaInterna = 0;
-        for (int i = tid; i < dims; i += nt){
-            sumaInterna += (centroid[i] - dato[i]) * (centroid[i] - dato[i]); // ||c - x||²
-        }
-#pragma omp critical
-        suma += sumaInterna;
-    }
-    return suma;
-}
 
-void rayTracingCPU(
-    unsigned char* img,
-    int w, int h,
-    int ns = 10,
-    int px = 0,      // offset en X del parche
-    int py = 0,      // offset en Y del parche
-    int pw = -1,     // tamaño X absoluto (o -1 para usar w)
-    int ph = -1,      // tamaño Y absoluto (o -1 para usar h)
-	Scene world = loadObjectsFromFile("Scene1.txt")
-) {
-    // Si no se especifica pw/ph, cubrir toda la imagen
-    if (pw == -1) pw = w;
-    if (ph == -1) ph = h;
+void rayTracingCPU(Scene world, unsigned char* img, int w, int h, int ns = 10, int px = 0, int py = 0, int pw = -1, int ph = -1) {
+	if (pw == -1) pw = w;
+	if (ph == -1) ph = h;
+	int patch_w = pw - px;
+	
+	//Scene world = loadObjectsFromFile("Scene1.txt");
+	
+	Vec3 lookfrom(13, 2, 3);
+	Vec3 lookat(0, 0, 0);
+	float dist_to_focus = 10.0;
+	float aperture = 0.1f;
 
-    int patch_w = pw - px;
-    int patch_h = ph - py;
+	Camera cam(lookfrom, lookat, Vec3(0, 1, 0), 20, float(w) / float(h), aperture, dist_to_focus);
 
-    Vec3 lookfrom(13, 2, 3);
-    Vec3 lookat(0, 0, 0);
-    float dist_to_focus = 10.0f;
-    float aperture = 0.1f;
-    Camera cam(
-        lookfrom, lookat, Vec3(0, 1, 0),
-        20.0f,
-        float(w) / float(h),
-        aperture,
-        dist_to_focus
-    );
+	#pragma omp for
+	for (int j = 0; j < (ph - py); j++) {
+		for (int i = 0; i < (pw - px); i++) {
 
-	int nt;
-	#pragma omp parallel
-    {
-        int tid;
-        nt = omp_get_num_threads();
-        tid = omp_get_thread_num();
-		// Iterar sobre cada píxel del parche
-		for (int j = tid; j < patch_h; j+=nt) {
-			for (int i = 0; i < patch_w; ++i) {
-		// for(int j=0;j<patch_h;++j){
-		// 	for (int i=tid;i<patch_w;i+=nt) {
-				Vec3 col(0.0f, 0.0f, 0.0f);
-				// Muestras para anti-aliasing
-				for (int s = 0; s < ns; ++s) {
-					float u = float(i + px + Random()) / float(w);
-					float v = float(j + py + Random()) / float(h);
-					Ray r = cam.get_ray(u, v);
-					col += world.getSceneColor(r);
-				}
-				// Promediar y corrección gamma (sqrt)
-				col /= float(ns);
-				col = Vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
-
-				// Coordenadas globales en el buffer
-				int x = i + px;
-				int y = j + py;
-				int idx = (y * w + x) * 3;
-
-				img[idx + 0] = char(255.99f * col[2]); // B
-				img[idx + 1] = char(255.99f * col[1]); // G
-				img[idx + 2] = char(255.99f * col[0]); // R
+			Vec3 col(0, 0, 0);
+			for (int s = 0; s < ns; s++) {
+				float u = float(i + px + Random()) / float(w);
+				float v = float(j + py + Random()) / float(h);
+				Ray r = cam.get_ray(u, v);
+				col += world.getSceneColor(r);
 			}
-    	}
+			col /= float(ns);
+			col = Vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
+
+			img[(j * patch_w + i) * 3 + 2] = char(255.99 * col[0]);
+			img[(j * patch_w + i) * 3 + 1] = char(255.99 * col[1]);
+			img[(j * patch_w + i) * 3 + 0] = char(255.99 * col[2]);
+		}
 	}
 }
 
-int main() {
-	srand(time(0));
-    int w = 3840;
-	int h = 2160;
-	int ns = 50;
-    const int patches_x = 1;
-    const int patches_y = 1;
 
-    int patch_x_size = w / patches_x;
-    int patch_y_size = h / patches_y;
+int main(int argc, char* argv[]) {
+	MPI_Init(&argc, &argv);
 
-	// Creación de la escena
+	int np, pid;
+	MPI_Comm_size(MPI_COMM_WORLD, &np);
+	MPI_Comm_rank(MPI_COMM_WORLD, &pid);
+
+	int w = 1080;
+	int h = 1080;
+	int ns = 10;
+
+	int patch_w = h;
+	int patch_h = 32;
+
+	int patches_x = (w + patch_w - 1) / patch_w;
+	int patches_y = (h + patch_h - 1) / patch_h;
+	int total_patches = patches_x * patches_y;
+
+	// Crear escena
+	srand(1);
 	Scene world = randomScene();
-    world.setSkyColor(Vec3(0.5f, 0.7f, 1.0f));
-    world.setInfColor(Vec3(1.0f, 1.0f, 1.0f));
+	world.setSkyColor(Vec3(0.5f, 0.7f, 1.0f));
+	world.setInfColor(Vec3(1.0f, 1.0f, 1.0f));
 
+	unsigned char* final_image = nullptr;
+	if (pid == 0) {
+		final_image = (unsigned char*)calloc(w * h * 3, 1); // imagen completa
+	}
 
-    // Buffer para toda la imagen
-    size_t total_size = sizeof(unsigned char) * w * h * 3;
-    unsigned char* data = (unsigned char*) calloc(total_size, 1);
-
+	unsigned char* data;
 	auto t0 = std::chrono::high_resolution_clock::now();
-    // Renderizar cada parche
-    for (int py = 0; py < patches_y; ++py) {
-        for (int px = 0; px < patches_x; ++px) {
-            int x0 = px * patch_x_size;
-            int x1 = (px == patches_x - 1) ? w : x0 + patch_x_size;
-            int y0 = py * patch_y_size;
-            int y1 = (py == patches_y - 1) ? h : y0 + patch_y_size;
-            rayTracingCPU(data, w, h, ns, x0, y0, x1, y1,world);
-        }
-    }
-	auto t1 = std::chrono::high_resolution_clock::now();
-	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-	std::cout << "Tiempo total de ejecución: " << float(ms)/1000 << " s\n";
-    // Guardar la imagen completa
-    writeBMP("imgCompleta.bmp", data, w, h);
-    printf("Imagen generada.\n");
+	#pragma omp parallel
+	{
+		// Cada proceso trabaja sobre múltiples parches
+		for (int patch_id = pid; patch_id < total_patches; patch_id += np) {
+			int patch_x_idx = patch_id % patches_x;
+			int patch_y_idx = patch_id / patches_x;
 
-    free(data);
-	//getchar();
+			int patch_x_start = patch_x_idx * patch_w;
+			int patch_y_start = patch_y_idx * patch_h;
+			int patch_x_end = std::min(patch_x_start + patch_w, w);
+			int patch_y_end = std::min(patch_y_start + patch_h, h);
+
+			int local_width = patch_x_end - patch_x_start;
+			int local_height = patch_y_end - patch_y_start;
+			int patch_size = local_width * local_height * 3;
+
+			#pragma omp single
+			data = (unsigned char*)calloc(patch_size, 1);
+			#pragma omp barrier
+
+			rayTracingCPU(world, data, w, h, ns, patch_x_start, patch_y_start, patch_x_end, patch_y_end);
+			#pragma omp barrier
+			if (pid == 0) {
+				// Copiar los datos directamente a la imagen final
+				for (int j = 0; j < local_height; ++j) {
+					memcpy(
+						final_image + ((patch_y_start + j) * w + patch_x_start) * 3,
+						data + j * local_width * 3,
+						local_width * 3
+					);
+				}
+			} else {
+				// Enviar primero las coordenadas y dimensiones
+				#pragma omp single
+				{
+				int meta[4] = { patch_x_start, patch_y_start, local_width, local_height };
+				MPI_Send(meta, 4, MPI_INT, 0, 0, MPI_COMM_WORLD);
+				MPI_Send(data, patch_size, MPI_UNSIGNED_CHAR, 0, 1, MPI_COMM_WORLD);
+				}
+			}
+			#pragma omp barrier
+			#pragma omp single
+			free(data);
+		}
+	}
+	// El proceso 0 recibe el resto de parches
+	if (pid == 0) {
+		for (int patch_id = 0; patch_id < total_patches; ++patch_id) {
+			if (patch_id % np == 0) continue;
+
+			int meta[4];
+			MPI_Status status;
+			MPI_Recv(meta, 4, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+			int source = status.MPI_SOURCE;
+
+			int patch_x_start = meta[0];
+			int patch_y_start = meta[1];
+			int local_width = meta[2];
+			int local_height = meta[3];
+			int patch_size = local_width * local_height * 3;
+
+			unsigned char* data = (unsigned char*)malloc(patch_size);
+			MPI_Recv(data, patch_size, MPI_UNSIGNED_CHAR, source, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+			for (int j = 0; j < local_height; ++j) {
+				memcpy(
+					final_image + ((patch_y_start + j) * w + patch_x_start) * 3,
+					data + j * local_width * 3,
+					local_width * 3
+				);
+			}
+			free(data);
+		}
+		// Guardar imagen completa
+		writeBMP("imagen_final.bmp", final_image, w, h);
+		printf("Proceso 0: Imagen final generada.\n");
+		free(final_image);
+	}
+	if (pid == 0){
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto ms1 = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::cout << "Tiempo total de ejecución: " << float(ms1)/1000 << " s\n";
+    }
+
+	MPI_Finalize();
 	return 0;
 }
